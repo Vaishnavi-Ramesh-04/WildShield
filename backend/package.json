@@ -1,0 +1,11 @@
+{
+  "name": "wildshield-backend",
+  "version": "0.1.0",
+  "description": "WildShield Phase 1 prototype: wildlife proximity alerts with e-pass access control",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT"
+}
