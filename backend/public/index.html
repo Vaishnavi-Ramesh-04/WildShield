@@ -16,11 +16,33 @@
   .high { border-color: #ef6c00; background: #fff3e0; }
   .caution { border-color: #f9a825; background: #fffde7; }
   small { color: #666; }
+  #login { position: fixed; inset: 0; background: #1b5e20; display: flex; align-items: center; justify-content: center; z-index: 2000; }
+  #login form { background: #fff; padding: 28px; border-radius: 10px; width: 300px; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
+  #login h1 { margin: 0 0 4px; font-size: 22px; color: #1b5e20; }
+  #login input { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0 12px; border: 1px solid #bbb; border-radius: 6px; font-size: 14px; }
+  button { padding: 10px; border: 0; border-radius: 6px; background: #2e7d32; color: #fff; font-size: 14px; cursor: pointer; }
+  #login button { width: 100%; }
+  #err { color: #c62828; font-size: 13px; min-height: 18px; }
+  #who { display: flex; justify-content: space-between; align-items: center; font-size: 13px; margin-bottom: 8px; }
+  #who button { padding: 4px 10px; background: #757575; }
 </style>
 </head>
 <body>
+<div id="login">
+  <form id="loginForm">
+    <h1>WildShield</h1>
+    <small>Forest Authority Login (officials and admin only)</small><br><br>
+    <label>Official ID</label>
+    <input id="lid" placeholder="e.g. FO-1001" autocomplete="username" required>
+    <label>Password</label>
+    <input id="lpw" type="password" autocomplete="current-password" required>
+    <div id="err"></div>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
 <div id="map"></div>
 <div id="side">
+  <div id="who"><span id="whoName"></span><button id="logout">Logout</button></div>
   <h2>WildShield Control Room</h2>
   <small>Live animals, passed-in visitors and alerts (refreshes every 2 s)</small>
   <h3>Animals</h3><div id="animals">-</div>
@@ -29,6 +51,29 @@
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+let token = sessionStorage.getItem("ws_token");
+const showLogin = (msg) => { document.getElementById("login").style.display = "flex"; document.getElementById("err").textContent = msg || ""; };
+const hideLogin = () => { document.getElementById("login").style.display = "none"; };
+if (token) hideLogin();
+
+document.getElementById("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const r = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: document.getElementById("lid").value, password: document.getElementById("lpw").value }) });
+  const d = await r.json();
+  if (!r.ok) return showLogin(d.error);
+  if (d.user.role === "user") return showLogin("Access denied: this dashboard is for forest officials only.");
+  token = d.token; sessionStorage.setItem("ws_token", token);
+  document.getElementById("whoName").textContent = `${d.user.name} (${d.user.role})`;
+  document.getElementById("lpw").value = "";
+  hideLogin(); refresh();
+});
+document.getElementById("logout").addEventListener("click", () => {
+  sessionStorage.removeItem("ws_token"); token = null; showLogin("Logged out"); 
+});
+if (token) fetch("/api/auth/me", { headers: { Authorization: "Bearer " + token } }).then(r => r.json())
+  .then(u => { if (u.name) document.getElementById("whoName").textContent = `${u.name} (${u.role})`; });
+
 const map = L.map("map").setView([10.285, 76.569], 15);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap" }).addTo(map);
 const layer = L.layerGroup().addTo(map);
@@ -36,7 +81,9 @@ const colors = { boundary: "#2e7d32", village: "#c62828", trail: "#ef6c00" };
 
 async function refresh() {
   try {
-    const r = await fetch("/api/live", { headers: { "x-user-id": "o1" } });
+    if (!token) return;
+    const r = await fetch("/api/live", { headers: { Authorization: "Bearer " + token } });
+    if (r.status === 401 || r.status === 403) { sessionStorage.removeItem("ws_token"); token = null; return showLogin("Session expired. Please sign in again."); }
     const d = await r.json();
     layer.clearLayers();
     d.zones.forEach(z => L.polygon(z.polygon, { color: colors[z.type] || "#555", weight: 2, fillOpacity: 0.08 })

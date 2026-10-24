@@ -19,9 +19,9 @@ p.add_argument("--delay", type=float, default=1.0, help="seconds between GPS fix
 args = p.parse_args()
 
 
-def call(method, path, user=None, body=None, device=False):
+def call(method, path, token=None, body=None, device=False):
     headers = {"Content-Type": "application/json"}
-    if user: headers["x-user-id"] = user
+    if token: headers["Authorization"] = "Bearer " + token
     if device: headers["x-device-key"] = "demo-key"
     req = urllib.request.Request(args.url + path, method=method, headers=headers,
                                  data=json.dumps(body).encode() if body is not None else None)
@@ -42,16 +42,26 @@ STEPS = 15
 
 call("POST", "/api/reset")
 
+step("0. Login (real accounts)")
+_, r = call("POST", "/api/auth/login", body={"login": "9000000001", "password": "Trekker@123"})
+ANITA = r["token"]; print("Anita (public user) logged in")
+_, r = call("POST", "/api/auth/login", body={"login": "9000000002", "password": "Trekker@123"})
+RAHUL = r["token"]; print("Rahul (public user) logged in")
+_, r = call("POST", "/api/auth/login", body={"login": "FO-1001", "password": "Ranger@123"})
+RANGER = r["token"]; print("Forest official FO-1001 logged in:", r["user"]["name"])
+print("Wrong password ->", call("POST", "/api/auth/login", body={"login": "FO-1001", "password": "bad"})[1])
+print("Public user opening officials' dashboard data ->", call("GET", "/api/live", ANITA)[0], "(forbidden)")
+
 step("1. E-pass flow")
-_, pas = call("POST", "/api/passes", "u1", {"trail": "Trail B", "group_size": 2})
+_, pas = call("POST", "/api/passes", ANITA, {"trail": "Trail B", "group_size": 2})
 print("Anita requested pass:", pas["id"], pas["status"])
-print("Anita tries to share location without an active pass ->", call("POST", "/api/users/location", "u1",
+print("Anita tries to share location without an active pass ->", call("POST", "/api/users/location", ANITA,
       {"lat": USER_POS[0], "lon": USER_POS[1]})[0], "(blocked)")
-print("Approve (Ranger Anil):", call("POST", f"/api/passes/{pas['id']}/approve", "o1")[1]["status"])
-print("Gate scan / activate :", call("POST", f"/api/passes/{pas['id']}/activate", "o1")[1]["status"])
-print("Anita shares location ->", call("POST", "/api/users/location", "u1",
+print("Approve (Ranger Anil):", call("POST", f"/api/passes/{pas['id']}/approve", RANGER)[1]["status"])
+print("Gate scan / activate :", call("POST", f"/api/passes/{pas['id']}/activate", RANGER)[1]["status"])
+print("Anita shares location ->", call("POST", "/api/users/location", ANITA,
       {"lat": USER_POS[0], "lon": USER_POS[1]})[0], "(allowed)")
-print("Rahul (no pass) shares location ->", call("POST", "/api/users/location", "u2",
+print("Rahul (no pass) shares location ->", call("POST", "/api/users/location", RAHUL,
       {"lat": USER_POS[0], "lon": USER_POS[1]})[0], "(blocked, he is ignored by the alert engine)")
 
 step("2. Elephant E-12 collar sends GPS fixes")
@@ -69,7 +79,7 @@ for i in range(STEPS + 1):
     time.sleep(args.delay)
 
 step("3. AI prediction (linear extrapolation, 30 min ahead)")
-_, pr = call("GET", "/api/animals/E-12/prediction?minutes=30", "o1")
+_, pr = call("GET", "/api/animals/E-12/prediction?minutes=30", RANGER)
 print(pr)
 
 step("4. GPS glitch is rejected (data validation)")
@@ -78,8 +88,8 @@ print(call("POST", "/api/animals/location", body={"animal_id": "E-12", "lat": 11
       "timestamp": bad_ts}, device=True))
 
 step("5. Trekker exits the forest -> pass closed -> access cut off")
-print("Close pass:", call("POST", f"/api/passes/{pas['id']}/close", "o1")[1]["status"])
-print("Anita shares location ->", call("POST", "/api/users/location", "u1",
+print("Close pass:", call("POST", f"/api/passes/{pas['id']}/close", RANGER)[1]["status"])
+print("Anita shares location ->", call("POST", "/api/users/location", ANITA,
       {"lat": USER_POS[0], "lon": USER_POS[1]}))
-print("Anita opens her alerts ->", call("GET", "/api/me/alerts", "u1"))
+print("Anita opens her alerts ->", call("GET", "/api/me/alerts", ANITA))
 print("\nDone. Open http://localhost:3000 to see the dashboard.")

@@ -8,6 +8,7 @@ const state = require("./src/store");
 const { haversine, predictLinear } = require("./src/geo");
 const { evaluate } = require("./src/alerts");
 const passes = require("./src/passes");
+const auth = require("./src/auth");
 
 const PORT = process.env.PORT || 3000;
 const DEVICE_KEY = process.env.DEVICE_KEY || "demo-key"; // the GPS device must send this key
@@ -27,18 +28,99 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(fail(400, "Invalid JSON")); } });
 });
 
-// Demo auth: caller identifies with header x-user-id. Phase 2: replace with JWT login.
+// Real auth: "Authorization: Bearer <token>" from /api/auth/login
 function authUser(req, ...roles) {
-  const user = state.users[req.headers["x-user-id"]];
-  if (!user) throw fail(401, "Unknown user (send header x-user-id)");
+  const header = req.headers["authorization"] || "";
+  const payload = header.startsWith("Bearer ") ? auth.verifyToken(header.slice(7)) : null;
+  if (!payload) throw fail(401, "Login required (missing or expired token)");
+  const user = state.users[payload.sub];
+  if (!user) throw fail(401, "Account no longer exists");
+  if (user.blocked) throw fail(403, "Account blocked. Contact the administrator.");
   if (roles.length && !roles.includes(user.role)) throw fail(403, `Role '${user.role}' is not allowed here`);
   return user;
 }
+const publicUser = (u) => { const { password_hash, ...rest } = u; return rest; };
+const logAudit = (actor, action, detail = "") =>
+  state.audit.push({ time: new Date().toISOString(), actor, action, detail });
+const MAX_FAILS = 5, LOCK_MIN = 5;
+const findByLogin = (login) => Object.values(state.users).find((u) =>
+  [u.official_id, u.email, u.phone].some((v) => v && v.toLowerCase() === String(login).toLowerCase()));
 const validLatLon = (lat, lon) =>
   typeof lat === "number" && typeof lon === "number" && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
 
 // ---------- route handlers ----------
 const routes = [
+  // ---- Authentication ----
+  ["POST", /^\/api\/auth\/login$/, async (req) => {
+    const { login, password } = await readBody(req);
+    if (!login || !password) throw fail(400, "login and password are required");
+    const key = String(login).toLowerCase();
+    const f = state.loginFailures[key];
+    if (f && f.until > Date.now()) throw fail(429, `Too many failed attempts. Try again in ${LOCK_MIN} minutes.`);
+    const user = findByLogin(login);
+    if (!user || !auth.verifyPassword(password, user.password_hash)) {
+      const cur = state.loginFailures[key] || { count: 0, until: 0 };
+      cur.count += 1;
+      if (cur.count >= MAX_FAILS) { cur.until = Date.now() + LOCK_MIN * 60000; cur.count = 0; }
+      state.loginFailures[key] = cur;
+      logAudit(String(login), "LOGIN_FAILED");
+      throw fail(401, "Invalid ID or password"); // same message for both cases on purpose
+    }
+    if (user.blocked) throw fail(403, "Account blocked. Contact the administrator.");
+    delete state.loginFailures[key];
+    logAudit(user.id, "LOGIN", user.role);
+    return [200, { token: auth.signToken({ sub: user.id, role: user.role }), user: publicUser(user) }];
+  }],
+  ["POST", /^\/api\/auth\/register$/, async (req) => { // PUBLIC users only. Officials cannot self-register.
+    const { name, phone, email, password, emergency_contact } = await readBody(req);
+    if (!name || !password || (!phone && !email)) throw fail(400, "name, password and phone or email are required");
+    if (String(password).length < 8) throw fail(422, "Password must be at least 8 characters");
+    if ((phone && findByLogin(phone)) || (email && findByLogin(email))) throw fail(409, "Phone or email already registered");
+    const id = "u" + state.nextUserId++;
+    state.users[id] = { id, name, phone, email, emergency_contact, role: "user", blocked: false,
+      created_at: new Date().toISOString(), password_hash: auth.hashPassword(password) };
+    logAudit(id, "REGISTER", "public user");
+    return [201, publicUser(state.users[id])];
+  }],
+  ["GET", /^\/api\/auth\/me$/, async (req) => [200, publicUser(authUser(req))]],
+  ["POST", /^\/api\/auth\/change-password$/, async (req) => {
+    const user = authUser(req);
+    const { old_password, new_password } = await readBody(req);
+    if (!auth.verifyPassword(old_password || "", user.password_hash)) throw fail(401, "Old password is wrong");
+    if (String(new_password || "").length < 8) throw fail(422, "Password must be at least 8 characters");
+    user.password_hash = auth.hashPassword(new_password);
+    logAudit(user.id, "PASSWORD_CHANGED");
+    return [200, { ok: true }];
+  }],
+
+  // ---- Admin: manage forest officials (officials cannot self-register) ----
+  ["POST", /^\/api\/admin\/officials$/, async (req) => {
+    const admin = authUser(req, "admin");
+    const { name, official_id, password, area } = await readBody(req);
+    if (!name || !official_id || !password) throw fail(400, "name, official_id and password are required");
+    if (String(password).length < 8) throw fail(422, "Password must be at least 8 characters");
+    if (findByLogin(official_id)) throw fail(409, "Official ID already exists");
+    const id = "o" + state.nextUserId++;
+    state.users[id] = { id, name, official_id, area, role: "official", blocked: false,
+      created_at: new Date().toISOString(), password_hash: auth.hashPassword(password) };
+    logAudit(admin.id, "OFFICIAL_CREATED", official_id);
+    return [201, publicUser(state.users[id])];
+  }],
+  ["GET", /^\/api\/admin\/users$/, async (req) => {
+    authUser(req, "admin");
+    return [200, Object.values(state.users).map(publicUser)];
+  }],
+  ["POST", /^\/api\/admin\/users\/([\w-]+)\/(block|unblock)$/, async (req, m) => {
+    const admin = authUser(req, "admin");
+    const target = state.users[m[1]];
+    if (!target) throw fail(404, "User not found");
+    if (target.id === admin.id) throw fail(409, "You cannot block yourself");
+    target.blocked = m[2] === "block";
+    logAudit(admin.id, m[2].toUpperCase(), target.id);
+    return [200, publicUser(target)];
+  }],
+  ["GET", /^\/api\/admin\/audit$/, async (req) => { authUser(req, "admin"); return [200, state.audit.slice(-200).reverse()]; }],
+
   // ---- GPS device -> server (System component 1 -> 2) ----
   ["POST", /^\/api\/animals\/location$/, async (req) => {
     if (req.headers["x-device-key"] !== DEVICE_KEY) throw fail(401, "Invalid device key");
@@ -91,6 +173,7 @@ const routes = [
     const actor = authUser(req, "official", "admin"); // gate staff / admin
     const pass = passes.transition(m[1], m[2], actor.id);
     if (pass.status === "CLOSED") delete state.userLocation[pass.user_id]; // stop tracking on exit
+    logAudit(actor.id, "PASS_" + m[2].toUpperCase(), pass.id);
     return [200, pass];
   }],
 
@@ -124,7 +207,7 @@ const routes = [
   // ---- Demo helper ----
   ["POST", /^\/api\/reset$/, async () => {
     state.animalTrail = {}; state.userLocation = {}; state.passes = {}; state.alerts = [];
-    state.lastAlert = {}; state.nextPassId = 1;
+    state.lastAlert = {}; state.nextPassId = 1; state.audit = []; state.loginFailures = {};
     return [200, { reset: true }];
   }],
 ];

@@ -12,7 +12,9 @@ Team: Saniya Sara Biju, Sreehari K K, T R Sreelakshmi, Vaishnavi R. Guide: Ms. A
 | Geofencing with point-in-polygon (village, trail zones) | `backend/src/geo.js`, `data/zones.json` |
 | Alert cooldown + escalation (caution, high, critical) | `backend/src/alerts.js` |
 | E-pass lifecycle (REQUESTED, APPROVED, ACTIVE, CLOSED) and server-side access cut-off | `backend/src/passes.js` |
-| Role-based access (user / official / admin) | `backend/server.js` |
+| Login: hashed passwords (scrypt), signed JWT tokens, lockout after 5 failed attempts | `backend/src/auth.js`, `server.js` |
+| Role-based access (user / official / admin); officials are created by admin only | `backend/server.js` |
+| Admin: create officials, block/unblock users, audit log | `backend/server.js` |
 | Movement prediction (linear extrapolation; LSTM planned for Phase 2) | `backend/src/geo.js` |
 | Live forest authority dashboard (map, trails, alerts) | `backend/public/index.html` |
 | GPS collar simulator + full demo scenario | `simulator/demo.py` |
@@ -43,12 +45,27 @@ cd backend && npm test
 | POST | `/api/animals/location` | GPS device (header `x-device-key`) |
 | POST | `/api/users/location` | user with ACTIVE pass |
 | GET | `/api/me/alerts` | user with ACTIVE pass |
+| POST | `/api/auth/login` | anyone |
+| POST | `/api/auth/register` | public users (role is always `user`) |
+| POST | `/api/auth/change-password` | logged-in user |
+| POST | `/api/admin/officials` | admin only (creates official accounts) |
+| GET | `/api/admin/users`, `/api/admin/audit` | admin only |
+| POST | `/api/admin/users/:id/block \| unblock` | admin only |
 | POST | `/api/passes` | user (request) |
 | POST | `/api/passes/:id/approve \| activate \| close` | official / admin |
 | GET | `/api/live`, `/api/alerts`, `/api/passes` | official / admin |
 | GET | `/api/animals/:id/prediction?minutes=30` | official / admin |
 
-Demo users: `u1`, `u2` (public), `o1` (official), `a1` (admin), sent as header `x-user-id`.
+## Demo accounts (change before real use)
+| Role | Login | Password |
+|---|---|---|
+| Admin | `ADMIN` | `Admin@123` |
+| Forest official | `FO-1001` / `FO-1002` | `Ranger@123` |
+| Public user | `9000000001` / `9000000002` | `Trekker@123` |
+
+Send the token from `POST /api/auth/login` as `Authorization: Bearer <token>`.
+Dashboard (http://localhost:3000) accepts officials and admin only.
+Set `JWT_SECRET` as an environment variable before any real deployment.
 
 ## Roadmap
 - Phase 2: Flutter mobile app, Firebase Cloud Messaging + SMS, MongoDB/PostgreSQL, JWT login
